@@ -1,0 +1,53 @@
+# spark-job/manifests/01-spark-scripts-pv.yaml
+#
+# WHY THIS IS THE KEY PIECE FOR LIVE EDITING
+# ────────────────────────────────────────────
+# Kind's extraMounts wires your laptop path into the node container:
+#
+#   laptop: ./spark-job/scripts  ──extraMounts──►  node: /data/spark-scripts
+#
+# This PersistentVolume exposes that node path as a Kubernetes volume:
+#
+#   node: /data/spark-scripts  ──hostPath PV──►  PVC  ──►  Spark pods
+#
+# When you save test_spark_job.py on your laptop, the change propagates
+# through the bind-mount chain instantly — no docker cp, no rebuild.
+#
+# ReadOnlyMany is used so driver AND executor pods can both mount the
+# volume at the same time on the same node.
+---
+# apiVersion: v1
+# kind: PersistentVolume
+# metadata:
+#   name: spark-scripts-pv
+#   labels:
+#     app: spark-scripts
+#     type: local
+# spec:
+#   storageClassName: manual
+#   capacity:
+#     storage: 1Gi
+#   accessModes:
+#     - ReadOnlyMany
+#   hostPath:
+#     path: /data/spark-scripts    # populated via extraMounts from your laptop
+#     type: Directory              # Directory (not DirectoryOrCreate) so we get
+#                                  # a clear error if extraMounts wasn't set up
+#   persistentVolumeReclaimPolicy: Retain
+
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: spark-scripts-pvc
+  namespace: spark-job
+  labels:
+    app: spark-scripts
+spec:
+  storageClassName: manual
+  accessModes:
+    - ReadOnlyMany
+  resources:
+    requests:
+      storage: 1Gi
+  volumeName: spark-scripts-pv

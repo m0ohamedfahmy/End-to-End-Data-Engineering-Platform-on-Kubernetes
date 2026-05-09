@@ -1,0 +1,46 @@
+# minio/manifests/02-minio-pv-pvc.yaml
+#
+# WHY THIS WORKS WITH extraMounts
+# ────────────────────────────────
+# Kind's extraMounts bind-mounts ./data/minio (on your laptop) into
+# the Kind node container at /data/minio.  This PersistentVolume then
+# exposes that same path to the MinIO pod via a Kubernetes hostPath.
+#
+# Data written by MinIO appears directly on your laptop at ./data/minio —
+# no docker cp needed, and data survives pod restarts.
+---
+## IF you need extraMounts, uncomment the following and edit the hostPath values to match your local laptop paths. 
+# apiVersion: v1
+# kind: PersistentVolume
+# metadata:
+#   name: minio-pv
+#   labels:
+#     app: minio
+#     type: local
+# spec:
+#   storageClassName: manual
+#   capacity:
+#     storage: 10Gi
+#   accessModes:
+#     - ReadWriteOnce
+#   hostPath:
+#     path: /data/minio          # this path exists inside the Kind node
+#     type: DirectoryOrCreate    # created automatically if absent
+#   persistentVolumeReclaimPolicy: Retain
+
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: minio-pvc
+  namespace: minio
+  labels:
+    app: minio
+spec:
+  storageClassName: manual
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 10Gi
+  #volumeName: minio-pv         # explicit binding to our PV

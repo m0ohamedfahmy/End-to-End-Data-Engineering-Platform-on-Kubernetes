@@ -1,0 +1,30 @@
+---
+# All four namespaces created up-front so subsequent manifests can reference
+# them without ordering issues.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: spark-operator
+  labels:
+    app.kubernetes.io/managed-by: kubectl
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: minio
+  labels:
+    app.kubernetes.io/managed-by: kubectl
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: spark-job
+  labels:
+    app.kubernetes.io/managed-by: kubectl
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: airflow
+  labels:
+    app.kubernetes.io/managed-by: kubectl

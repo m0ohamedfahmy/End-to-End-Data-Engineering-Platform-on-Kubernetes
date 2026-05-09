@@ -1,0 +1,47 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# extraMounts bind-mount directories from your LOCAL laptop into the Kind node
+# container.  Kubernetes hostPath volumes then expose those paths to pods.
+# The chain is:
+#   Local laptop  →  Kind node container  →  Kubernetes Pod (hostPath)
+#
+# This gives true live editing: save on laptop → immediately in pod.
+# ─────────────────────────────────────────────────────────────────────────────
+
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+nodes:
+- role: control-plane
+# IF you need extraMounts, uncomment the following and edit the hostPath values to match your local laptop paths.  
+  # extraMounts:
+  #   - hostPath: /home/ninja/spark-kind/spark-job/scripts
+  #     containerPath: /data/spark-scripts
+  #   - hostPath: /home/ninja/spark-kind/airflow-dags
+  #     containerPath: /data/airflow-dags
+  #   - hostPath: /home/ninja/spark-kind/data/minio             # created automatically by setup.sh
+  #     containerPath: /data/minio      
+  extraPortMappings:
+    - containerPort: 30080   # Airflow webserver NodePort
+      hostPort: 8080
+      protocol: TCP
+    - containerPort: 30900   # MinIO API NodePort
+      hostPort: 9000
+      protocol: TCP
+    - containerPort: 30901   # MinIO Console NodePort
+      hostPort: 9001
+      protocol: TCP     
+- role: worker
+  kubeadmConfigPatches:
+  - |
+    kind: JoinConfiguration
+    nodeRegistration:
+      kubeletExtraArgs:
+        node-labels: "node=worker_1"
+  
+# IF you need extraMounts, uncomment the following and edit the hostPath values to match your local laptop paths.
+  # extraMounts:
+  #   - hostPath: /home/ninja/spark-kind/spark-job/scripts
+  #     containerPath: /data/spark-scripts
+  #   - hostPath: /home/ninja/spark-kind/airflow-dags
+  #     containerPath: /data/airflow-dags
+  #   - hostPath: /home/ninja/spark-kind/data/minio             # created automatically by setup.sh
+  #     containerPath: /data/minio      

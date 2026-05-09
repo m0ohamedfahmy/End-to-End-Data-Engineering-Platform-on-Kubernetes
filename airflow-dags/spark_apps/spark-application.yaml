@@ -1,0 +1,87 @@
+# manifests/spark-application.yaml
+#
+# Standalone SparkApplication manifest.
+# The DAG loads this file from MinIO at runtime — the spec lives HERE,
+# not hardcoded inside dag.py.
+#
+# HOW THE DAG USES THIS FILE:
+#   1. This YAML is uploaded to MinIO: s3://airflow-dags/spark-apps/pipeline.yaml
+#   2. The DAG fetches it at trigger time using MinioHook
+#   3. SparkKubernetesOperator receives the parsed dict — clean separation
+#
+# To update Spark config: edit this file → upload to MinIO → trigger DAG.
+# No DAG file change needed.
+#
+# Upload:
+#   aws --endpoint-url http://localhost:9000 s3 cp \
+#     spark-application.yaml s3://airflow-dags/spark-apps/pipeline.yaml
+---
+apiVersion: sparkoperator.k8s.io/v1beta2
+kind: SparkApplication
+metadata:
+  # Name is templated — DAG injects ds_nodash at runtime to make it unique
+  name: "spark-minio-pipeline-RUNDATE"
+  namespace: spark-job
+spec:
+  type: Python
+  pythonVersion: "3"
+  mode: cluster
+  image: spark-minio-s3a-custom:3.5.0
+  imagePullPolicy: IfNotPresent
+
+  # Script read directly from MinIO — no volumes, no mounts
+  mainApplicationFile: "s3a://spark-jobs/pipeline_job.py"
+
+  sparkVersion: "3.5.0"
+
+  restartPolicy:
+    type: OnFailure
+    onFailureRetries: 2
+    onFailureRetryInterval: 10
+
+  sparkConf:
+    "spark.hadoop.fs.s3a.endpoint": "http://minio-service.minio.svc.cluster.local:9000"
+    "spark.hadoop.fs.s3a.path.style.access": "true"
+    "spark.hadoop.fs.s3a.impl": "org.apache.hadoop.fs.s3a.S3AFileSystem"
+    "spark.hadoop.fs.s3a.connection.ssl.enabled": "false"
+    "spark.hadoop.fs.s3a.aws.credentials.provider": "org.apache.hadoop.fs.s3a.SimpleAWSCredentialsProvider"
+    "spark.hadoop.fs.s3a.access.key": "minio-admin"
+    "spark.hadoop.fs.s3a.secret.key": "minio-secret-password"
+    "spark.sql.shuffle.partitions": "2"
+    "spark.sql.adaptive.enabled": "true"
+    "spark.eventLog.enabled": "false"
+    "spark.driver.extraClassPath": "/opt/spark/jars/*"
+    "spark.executor.extraClassPath": "/opt/spark/jars/*"
+
+  driver:
+    cores: 1
+    memory: "512m"
+    serviceAccount: spark-driver-sa
+    # RUN_DATE injected by DAG at submit time so the script knows the partition
+    env:
+      - name: RUN_DATE
+        value: "RUNDATE"
+      - name: MINIO_ENDPOINT
+        value: "http://minio-service.minio.svc.cluster.local:9000"
+      - name: MINIO_BUCKET
+        value: "data-pro"
+      - name: INPUT_PREFIX
+        value: "raw"
+      - name: OUTPUT_PREFIX
+        value: "processed"
+
+  executor:
+    cores: 1
+    instances: 1
+    memory: "512m"
+    env:
+      - name: RUN_DATE
+        value: "RUNDATE"
+      - name: MINIO_ENDPOINT
+        value: "http://minio-service.minio.svc.cluster.local:9000"
+      - name: MINIO_BUCKET
+        value: "data-pro"
+      - name: INPUT_PREFIX
+        value: "raw"
+      - name: OUTPUT_PREFIX
+        value: "processed"

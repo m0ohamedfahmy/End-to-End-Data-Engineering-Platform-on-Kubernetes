@@ -1,0 +1,56 @@
+apiVersion: sparkoperator.k8s.io/v1beta2
+kind: SparkApplication
+metadata:
+  name: word-count-minio
+  namespace: spark-job
+spec:
+  type: Python
+  mode: cluster
+  pythonVersion: "3"
+  image: spark-minio-s3a-custom:3.5.0
+  imagePullPolicy: IfNotPresent
+  mainApplicationFile: "s3a://spark-jobs/test_spark_job.py"
+  sparkVersion: "3.5.0"
+
+  restartPolicy:
+    type: OnFailure
+    onFailureRetries: 2
+    onFailureRetryInterval: 10
+
+  sparkConf:
+    # MinIO endpoint — matches the Service name in minio.yaml
+    "spark.hadoop.fs.s3a.endpoint": "http://minio-service.minio.svc.cluster.local:9000"
+    "spark.hadoop.fs.s3a.path.style.access": "true"
+    "spark.hadoop.fs.s3a.impl": "org.apache.hadoop.fs.s3a.S3AFileSystem"
+    "spark.hadoop.fs.s3a.connection.ssl.enabled": "false"
+
+    # ── Credentials provider fix ──────────────────────────────────────────
+    # EnvironmentVariableCredentialsProvider does NOT exist in hadoop-aws 3.3.4.
+    # SimpleAWSCredentialsProvider is the correct class — it reads credentials
+    # directly from the two Hadoop conf keys below.
+    "spark.hadoop.fs.s3a.aws.credentials.provider": "org.apache.hadoop.fs.s3a.SimpleAWSCredentialsProvider"
+
+    # These two keys are what SimpleAWSCredentialsProvider reads.
+    # Values match MINIO_ROOT_USER / MINIO_ROOT_PASSWORD in minio.yaml.
+    "spark.hadoop.fs.s3a.access.key": "minio-admin"
+    "spark.hadoop.fs.s3a.secret.key": "minio-secret-password"
+
+    # Performance
+    "spark.sql.shuffle.partitions": "2"
+    "spark.sql.adaptive.enabled": "true"
+    "spark.eventLog.enabled": "false"
+
+    # Ensure JARs are on classpath for both driver and executor
+    "spark.driver.extraClassPath": "/opt/spark/jars/*"
+    "spark.executor.extraClassPath": "/opt/spark/jars/*"
+
+  # No env vars needed — SimpleAWSCredentialsProvider reads from sparkConf above
+  driver:
+    cores: 1
+    memory: "512m"
+    serviceAccount: spark-driver-sa
+
+  executor:
+    instances: 1
+    cores: 1
+    memory: "512m"

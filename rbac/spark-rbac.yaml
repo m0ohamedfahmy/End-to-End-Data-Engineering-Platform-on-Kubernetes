@@ -1,0 +1,94 @@
+# rbac/spark-rbac.yaml
+#
+# Three sets of RBAC objects:
+#
+#   1. spark-driver-sa + spark-driver-role
+#      The Spark driver pod runs as this ServiceAccount and needs
+#      permission to create/delete executor pods and services.
+#
+#   2. spark-operator-role + RoleBinding
+#      Grants the Spark Operator (installed in spark-operator ns)
+#      permission to manage SparkApplication objects and the pods/
+#      services they produce inside the spark-job namespace.
+---
+# ── 1. Driver ServiceAccount ────────────────────────────────────────────────
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: spark-driver-sa
+  namespace: spark-job
+  labels:
+    app.kubernetes.io/managed-by: kubectl
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: spark-driver-role
+  namespace: spark-job
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["create", "delete", "deletecollection", "get", "list", "patch", "update", "watch"]
+  - apiGroups: [""]
+    resources: ["services"]
+    verbs: ["create", "delete", "get", "list", "patch", "update", "watch"]
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["create", "delete", "get", "list", "patch", "update", "watch"]
+  - apiGroups: [""]
+    resources: ["persistentvolumeclaims"]
+    verbs: ["create", "delete", "get", "list", "patch", "update"]
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: spark-driver-rolebinding
+  namespace: spark-job
+subjects:
+  - kind: ServiceAccount
+    name: spark-driver-sa
+    namespace: spark-job
+roleRef:
+  kind: Role
+  name: spark-driver-role
+  apiGroup: rbac.authorization.k8s.io
+
+---
+# ── 2. Spark Operator cross-namespace permissions ───────────────────────────
+# The Operator's ServiceAccount lives in spark-operator namespace but
+# must manage resources in spark-job namespace.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: spark-operator-role
+  namespace: spark-job
+rules:
+  - apiGroups: ["sparkoperator.k8s.io"]
+    resources: [sparkapplications, sparkapplications/status,
+                scheduledsparkapplications, scheduledsparkapplications/status,
+                sparkconnects, sparkconnects/status]
+    verbs: [create, get, list, watch, delete, update, patch]
+  - apiGroups: [""]
+    resources: [pods, pods/log, pods/exec, services, configmaps, persistentvolumeclaims]
+    verbs: [create, get, list, watch, delete, update, patch]
+  - apiGroups: [""]
+    resources: [events]
+    verbs: [create, patch]
+
+---
+
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: spark-operator-rolebinding
+  namespace: spark-job
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: spark-operator-role
+subjects:
+  - kind: ServiceAccount
+    name: spark-operator-controller
+    namespace: spark-operator

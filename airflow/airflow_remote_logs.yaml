@@ -1,0 +1,737 @@
+# airflow.yaml
+#
+# Apache Airflow — MinIO S3-native DAG loading
+#
+# HOW DAG LOADING WORKS (replaces hostPath entirely):
+#
+#   1. You upload your DAG to MinIO:
+#        aws --endpoint-url http://localhost:9000 s3 cp \
+#          spark_minio_dag.py s3://airflow-dags/dags/
+#
+#   2. A sidecar container (mc-sync) runs inside scheduler/webserver/triggerer pods.
+#      It uses MinIO Client (mc) to sync s3://airflow-dags/dags/ → /opt/airflow/dags/
+#      every 30 seconds. No hostPath. No extraMounts. No docker cp.
+#
+#   3. Airflow re-scans /opt/airflow/dags/ every 10 seconds (DAG_DIR_LIST_INTERVAL).
+#      New or updated DAGs appear automatically within ~40 seconds of upload.
+#
+# LIVE UPDATE WORKFLOW:
+#   Edit DAG locally → aws s3 cp dag.py s3://airflow-dags/dags/ → visible in ~40s
+#
+# ─────────────────────────────────────────────────────────────────────────────
+
+# ── PostgreSQL ────────────────────────────────────────────────────────────────
+apiVersion: v1
+kind: Secret
+metadata:
+  name: airflow-postgres-secret
+  namespace: airflow
+type: Opaque
+stringData:
+  POSTGRES_USER: airflow
+  POSTGRES_PASSWORD: airflow_pass
+  POSTGRES_DB: airflow
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: postgres-pvc
+  namespace: airflow
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: standard
+  resources:
+    requests:
+      storage: 2Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: airflow-postgres
+  namespace: airflow
+  labels:
+    app: airflow-postgres
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: airflow-postgres
+  template:
+    metadata:
+      labels:
+        app: airflow-postgres
+    spec:
+      containers:
+        - name: postgres
+          image: postgres:15-alpine
+          imagePullPolicy: IfNotPresent
+          envFrom:
+            - secretRef:
+                name: airflow-postgres-secret
+          ports:
+            - containerPort: 5432
+          volumeMounts:
+            - name: postgres-data
+              mountPath: /var/lib/postgresql/data
+          readinessProbe:
+            exec:
+              command: [pg_isready, -U, airflow]
+            initialDelaySeconds: 10
+            periodSeconds: 5
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+      volumes:
+        - name: postgres-data
+          persistentVolumeClaim:
+            claimName: postgres-pvc
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: airflow-postgres
+  namespace: airflow
+spec:
+  selector:
+    app: airflow-postgres
+  ports:
+    - port: 5432
+      targetPort: 5432
+---
+
+# ── MinIO credentials for Airflow pods ───────────────────────────────────────
+# Used by the mc-sync sidecar to pull DAGs from MinIO.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: minio-credentials
+  namespace: airflow
+  labels:
+    app: minio
+type: Opaque
+data:
+  access-key: bWluaW8tYWRtaW4=          
+  secret-key: bWluaW8tc2VjcmV0LXBhc3N3b3Jk
+---
+
+# ── Shared Airflow ConfigMap ──────────────────────────────────────────────────
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: airflow-config
+  namespace: airflow
+data:
+  AIRFLOW__CORE__EXECUTOR: KubernetesExecutor
+  AIRFLOW__CORE__LOAD_EXAMPLES: "False"
+  AIRFLOW__CORE__DAGS_FOLDER: /opt/airflow/dags
+
+  AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow_pass@airflow-postgres:5432/airflow
+
+  AIRFLOW__WEBSERVER__EXPOSE_CONFIG: "True"
+  AIRFLOW__WEBSERVER__SECRET_KEY: "local-dev-secret-key-change-in-prod"
+
+  # Re-scan DAG folder every 10s — sidecar syncs every 30s so new DAGs
+  # appear within ~40 seconds of being uploaded to MinIO.
+  AIRFLOW__SCHEDULER__DAG_DIR_LIST_INTERVAL: "10"
+
+  AIRFLOW__LOGGING__LOGGING_LEVEL: INFO
+
+  # KubernetesExecutor settings
+  AIRFLOW__KUBERNETES__NAMESPACE: airflow
+  AIRFLOW__KUBERNETES__IN_CLUSTER: "True"
+  AIRFLOW__KUBERNETES__POD_TEMPLATE_FILE: /opt/airflow/pod_templates/pod_template.yaml
+  AIRFLOW__KUBERNETES__WORKER_PODS_CREATION_BATCH_SIZE: "8"
+  AIRFLOW__KUBERNETES__DELETE_WORKER_PODS: "True"
+  AIRFLOW__KUBERNETES__DELETE_WORKER_PODS_ON_FAILURE: "False"
+  AIRFLOW__KUBERNETES__WORKER_CONTAINER_REPOSITORY: apache/airflow
+  AIRFLOW__KUBERNETES__WORKER_CONTAINER_TAG: "2.8.1"
+  AIRFLOW__KUBERNETES_EXECUTOR__NAMESPACE: airflow
+
+  # MinIO connection details — used by mc-sync sidecar
+  MINIO_ENDPOINT: "http://minio-service.minio.svc.cluster.local:9000"
+  MINIO_BUCKET: "airflow-dags"
+  MINIO_DAG_PREFIX: "dags"
+  MINIO_SYNC_INTERVAL: "10"
+
+  # ── Remote logging to MinIO ───────────────────────────────────────────────
+  # Fixes: "Could not read served logs: Name or service not known"
+  # Logs are written to MinIO IN REAL TIME during task execution.
+  # After the worker pod is deleted, the UI reads logs from MinIO instead
+  # of trying to connect to the dead pod hostname.
+  #
+  # Requires: Airflow connection "minio_default" in Admin → Connections:
+  #   Conn Id   : minio_default
+  #   Conn Type : Amazon Web Services
+  #   Login     : minioadmin
+  #   Password  : minioadmin123
+  #   Extra     : {"endpoint_url": "http://minio-service.minio.svc.cluster.local:9000", "region_name": "us-east-1"}
+  AIRFLOW__LOGGING__REMOTE_LOGGING: "True"
+  AIRFLOW__LOGGING__REMOTE_BASE_LOG_FOLDER: "s3://airflow-logs/logs"
+  AIRFLOW__LOGGING__REMOTE_LOG_CONN_ID: "minio_default"
+  AIRFLOW__LOGGING__ENCRYPT_S3_LOGS: "False"
+---
+
+# ── airflow-init Job ──────────────────────────────────────────────────────────
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: airflow-init
+  namespace: airflow
+spec:
+  template:
+    spec:
+      restartPolicy: OnFailure
+      initContainers:
+        - name: wait-for-postgres
+          image: busybox:1.36
+          command:
+            - sh
+            - -c
+            - |
+              until nc -z airflow-postgres 5432; do
+                echo "waiting for postgres..."; sleep 3;
+              done
+      containers:
+        - name: airflow-init
+          # image: apache/airflow:2.8.1
+          image: apache/airflow:3.2.1
+          imagePullPolicy: IfNotPresent
+          command:
+            - bash
+            - -c
+            - |
+              # Create airflow-logs bucket in MinIO for remote logging
+              pip install awscli --quiet
+              aws configure set aws_access_key_id minioadmin
+              aws configure set aws_secret_access_key minioadmin123
+              aws configure set default.region us-east-1
+              aws --endpoint-url http://minio-service.minio.svc.cluster.local:9000 \
+                s3 mb s3://airflow-logs --region us-east-1 2>/dev/null || true
+              echo "airflow-logs bucket ready"
+
+              airflow db upgrade
+              airflow users create \
+                --username admin \
+                --password admin \
+                --firstname Admin \
+                --lastname User \
+                --role Admin \
+                --email admin@example.com
+              echo "Airflow init complete."
+          envFrom:
+            - configMapRef:
+                name: airflow-config
+---
+
+# ── Airflow ServiceAccount + RBAC ─────────────────────────────────────────────
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: airflow
+  namespace: airflow
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: airflow-spark-role
+rules:
+  - apiGroups: [""]
+    resources: [pods, pods/log, pods/exec]
+    verbs: [create, get, list, watch, delete, update, patch]
+  - apiGroups: [""]
+    resources: [configmaps, secrets, services]
+    verbs: [get, list, watch]
+  - apiGroups: [""]
+    resources: [events]
+    verbs: [create, patch]
+  - apiGroups: [sparkoperator.k8s.io]
+    resources: [sparkapplications, sparkapplications/status,
+                scheduledsparkapplications, scheduledsparkapplications/status]
+    verbs: [create, get, list, watch, delete, update, patch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: airflow-spark-binding
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: airflow-spark-role
+subjects:
+  - kind: ServiceAccount
+    name: airflow
+    namespace: airflow
+---
+
+# ── Worker Pod Template ───────────────────────────────────────────────────────
+# KubernetesExecutor uses this as the base spec for every task worker pod.
+# The mc-sync init container pre-populates /opt/airflow/dags from MinIO
+# before the task container starts — so every worker has the latest DAGs.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: airflow-pod-template
+  namespace: airflow
+data:
+  pod_template.yaml: |
+    apiVersion: v1
+    kind: Pod
+    metadata:
+      name: placeholder
+      namespace: airflow
+    spec:
+      serviceAccountName: airflow
+      restartPolicy: Never
+      initContainers:
+        # Pull DAGs from MinIO once before the task starts.
+        # Uses an emptyDir shared with the base container.
+        - name: dag-sync-init
+          image: minio/mc:RELEASE.2024-01-13T08-44-48Z
+          command:
+            - sh
+            - -c
+            - |
+              mc alias set minio http://minio-service.minio.svc.cluster.local:9000 \
+                $MINIO_ACCESS_KEY $MINIO_SECRET_KEY
+              mc mirror --overwrite minio/airflow-dags/dags/ /opt/airflow/dags/
+              echo "DAGs synced from MinIO for task worker"
+          env:
+            - name: MINIO_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: minio-credentials
+                  key: access-key
+            - name: MINIO_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: minio-credentials
+                  key: secret-key
+          volumeMounts:
+            - name: dags-volume
+              mountPath: /opt/airflow/dags
+      containers:
+        - name: base
+          image: apache/airflow:3.2.1
+          imagePullPolicy: IfNotPresent
+          envFrom:
+            - configMapRef:
+                name: airflow-config
+          volumeMounts:
+            - name: dags-volume
+              mountPath: /opt/airflow/dags
+              readOnly: true
+            - name: pod-template-volume
+              mountPath: /opt/airflow/pod_templates
+              readOnly: true
+          resources:
+            requests:
+              cpu: 200m
+              memory: 256Mi
+            limits:
+              cpu: 1000m
+              memory: 512Mi
+      volumes:
+        - name: dags-volume
+          emptyDir: {}
+        - name: pod-template-volume
+          configMap:
+            name: airflow-pod-template
+---
+
+# ── Scheduler Deployment ──────────────────────────────────────────────────────
+# Contains two containers:
+#   1. scheduler  — standard Airflow scheduler
+#   2. mc-sync    — sidecar that syncs DAGs from MinIO every 30 seconds
+# Both share the dags-volume emptyDir so DAG files flow:
+#   MinIO → mc-sync sidecar → emptyDir → scheduler reads
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: airflow-scheduler
+  namespace: airflow
+  labels:
+    app: airflow-scheduler
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: airflow-scheduler
+  template:
+    metadata:
+      labels:
+        app: airflow-scheduler
+    spec:
+      serviceAccountName: airflow
+      initContainers:
+        - name: wait-for-db
+          image: busybox:1.36
+          command:
+            - sh
+            - -c
+            - |
+              until nc -z airflow-postgres 5432; do
+                echo "waiting for postgres..."; sleep 3;
+              done
+        # Initial DAG sync before scheduler starts
+        - name: dag-sync-init
+          image: minio/mc:RELEASE.2024-01-13T08-44-48Z
+          command:
+            - sh
+            - -c
+            - |
+              mc alias set minio http://minio-service.minio.svc.cluster.local:9000 \
+                $MINIO_ACCESS_KEY $MINIO_SECRET_KEY
+              mc mirror --overwrite minio/airflow-dags/dags/ /opt/airflow/dags/
+              echo "Initial DAG sync complete"
+          env:
+            - name: MINIO_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: minio-credentials
+                  key: access-key
+            - name: MINIO_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: minio-credentials
+                  key: secret-key
+          volumeMounts:
+            - name: dags-volume
+              mountPath: /opt/airflow/dags
+      containers:
+        - name: scheduler
+          # image: apache/airflow:2.8.1
+          image: apache/airflow:3.2.1
+          imagePullPolicy: IfNotPresent
+          command: [airflow, scheduler]
+          envFrom:
+            - configMapRef:
+                name: airflow-config
+          volumeMounts:
+            - name: dags-volume
+              mountPath: /opt/airflow/dags
+            - name: pod-template-volume
+              mountPath: /opt/airflow/pod_templates
+              readOnly: true
+          resources:
+            requests:
+              cpu: 200m
+              memory: 512Mi
+            limits:
+              cpu: 1000m
+              memory: 1Gi
+
+        # ── mc-sync sidecar: polls MinIO every 30s and mirrors new/updated DAGs
+        - name: mc-sync
+          image: minio/mc:RELEASE.2024-01-13T08-44-48Z
+          command:
+            - sh
+            - -c
+            - |
+              mc alias set minio http://minio-service.minio.svc.cluster.local:9000 \
+                $MINIO_ACCESS_KEY $MINIO_SECRET_KEY
+              echo "mc-sync sidecar started — syncing every ${MINIO_SYNC_INTERVAL}s"
+              while true; do
+                mc mirror --overwrite minio/airflow-dags/dags/ /opt/airflow/dags/
+                echo "$(date): DAG sync complete"
+                sleep ${MINIO_SYNC_INTERVAL}
+              done
+          env:
+            - name: MINIO_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: minio-credentials
+                  key: access-key
+            - name: MINIO_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: minio-credentials
+                  key: secret-key
+            - name: MINIO_SYNC_INTERVAL
+              valueFrom:
+                configMapKeyRef:
+                  name: airflow-config
+                  key: MINIO_SYNC_INTERVAL
+          volumeMounts:
+            - name: dags-volume
+              mountPath: /opt/airflow/dags
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 128Mi
+
+      volumes:
+        - name: dags-volume
+          emptyDir: {}
+        - name: pod-template-volume
+          configMap:
+            name: airflow-pod-template
+---
+
+# ── Webserver Deployment ──────────────────────────────────────────────────────
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: airflow-webserver
+  namespace: airflow
+  labels:
+    app: airflow-webserver
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: airflow-webserver
+  template:
+    metadata:
+      labels:
+        app: airflow-webserver
+    spec:
+      serviceAccountName: airflow
+      initContainers:
+        - name: wait-for-db
+          image: busybox:1.36
+          command:
+            - sh
+            - -c
+            - |
+              until nc -z airflow-postgres 5432; do
+                echo "waiting for postgres..."; sleep 3;
+              done
+        - name: dag-sync-init
+          image: minio/mc:RELEASE.2024-01-13T08-44-48Z
+          command:
+            - sh
+            - -c
+            - |
+              mc alias set minio http://minio-service.minio.svc.cluster.local:9000 \
+                $MINIO_ACCESS_KEY $MINIO_SECRET_KEY
+              mc mirror --overwrite minio/airflow-dags/dags/ /opt/airflow/dags/
+              echo "Initial DAG sync complete"
+          env:
+            - name: MINIO_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: minio-credentials
+                  key: access-key
+            - name: MINIO_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: minio-credentials
+                  key: secret-key
+          volumeMounts:
+            - name: dags-volume
+              mountPath: /opt/airflow/dags
+      containers:
+        - name: webserver
+          # image: apache/airflow:2.8.1
+          image: apache/airflow:3.2.1
+          imagePullPolicy: IfNotPresent
+          command: [airflow, webserver]
+          envFrom:
+            - configMapRef:
+                name: airflow-config
+          ports:
+            - containerPort: 8080
+          volumeMounts:
+            - name: dags-volume
+              mountPath: /opt/airflow/dags
+              readOnly: true
+            - name: pod-template-volume
+              mountPath: /opt/airflow/pod_templates
+              readOnly: true
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 30
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: 200m
+              memory: 512Mi
+            limits:
+              cpu: 1000m
+              memory: 1Gi
+
+        # mc-sync sidecar for webserver — keeps DAG list in UI current
+        - name: mc-sync
+          image: minio/mc:RELEASE.2024-01-13T08-44-48Z
+          command:
+            - sh
+            - -c
+            - |
+              mc alias set minio http://minio-service.minio.svc.cluster.local:9000 \
+                $MINIO_ACCESS_KEY $MINIO_SECRET_KEY
+              while true; do
+                mc mirror --overwrite minio/airflow-dags/dags/ /opt/airflow/dags/
+                sleep ${MINIO_SYNC_INTERVAL}
+              done
+          env:
+            - name: MINIO_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: minio-credentials
+                  key: access-key
+            - name: MINIO_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: minio-credentials
+                  key: secret-key
+            - name: MINIO_SYNC_INTERVAL
+              valueFrom:
+                configMapKeyRef:
+                  name: airflow-config
+                  key: MINIO_SYNC_INTERVAL
+          volumeMounts:
+            - name: dags-volume
+              mountPath: /opt/airflow/dags
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 128Mi
+
+      volumes:
+        - name: dags-volume
+          emptyDir: {}
+        - name: pod-template-volume
+          configMap:
+            name: airflow-pod-template
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: airflow-webserver
+  namespace: airflow
+  labels:
+    app: airflow-webserver
+spec:
+  selector:
+    app: airflow-webserver
+  type: NodePort
+  ports:
+    - port: 8080
+      targetPort: 8080
+      nodePort: 30080
+---
+
+# ── Triggerer Deployment ──────────────────────────────────────────────────────
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: airflow-triggerer
+  namespace: airflow
+  labels:
+    app: airflow-triggerer
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: airflow-triggerer
+  template:
+    metadata:
+      labels:
+        app: airflow-triggerer
+    spec:
+      serviceAccountName: airflow
+      initContainers:
+        - name: dag-sync-init
+          image: minio/mc:RELEASE.2024-01-13T08-44-48Z
+          command:
+            - sh
+            - -c
+            - |
+              mc alias set minio http://minio-service.minio.svc.cluster.local:9000 \
+                $MINIO_ACCESS_KEY $MINIO_SECRET_KEY
+              mc mirror --overwrite minio/airflow-dags/dags/ /opt/airflow/dags/
+          env:
+            - name: MINIO_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: minio-credentials
+                  key: access-key
+            - name: MINIO_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: minio-credentials
+                  key: secret-key
+          volumeMounts:
+            - name: dags-volume
+              mountPath: /opt/airflow/dags
+      containers:
+        - name: triggerer
+          # image: apache/airflow:2.8.1
+          image: apache/airflow:3.2.1
+          imagePullPolicy: IfNotPresent
+          command: [airflow, triggerer]
+          envFrom:
+            - configMapRef:
+                name: airflow-config
+          volumeMounts:
+            - name: dags-volume
+              mountPath: /opt/airflow/dags
+              readOnly: true
+            - name: pod-template-volume
+              mountPath: /opt/airflow/pod_templates
+              readOnly: true
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+
+        - name: mc-sync
+          image: minio/mc:RELEASE.2024-01-13T08-44-48Z
+          command:
+            - sh
+            - -c
+            - |
+              mc alias set minio http://minio-service.minio.svc.cluster.local:9000 \
+                $MINIO_ACCESS_KEY $MINIO_SECRET_KEY
+              while true; do
+                mc mirror --overwrite minio/airflow-dags/dags/ /opt/airflow/dags/
+                sleep ${MINIO_SYNC_INTERVAL}
+              done
+          env:
+            - name: MINIO_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: minio-credentials
+                  key: access-key
+            - name: MINIO_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: minio-credentials
+                  key: secret-key
+            - name: MINIO_SYNC_INTERVAL
+              valueFrom:
+                configMapKeyRef:
+                  name: airflow-config
+                  key: MINIO_SYNC_INTERVAL
+          volumeMounts:
+            - name: dags-volume
+              mountPath: /opt/airflow/dags
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 128Mi
+
+      volumes:
+        - name: dags-volume
+          emptyDir: {}
+        - name: pod-template-volume
+          configMap:
+            name: airflow-pod-template
