@@ -1,0 +1,12 @@
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+name: analytics
+nodes:
+- role: control-plane
+  extraPortMappings:
+    - containerPort: 30088
+      hostPort: 8888
+      protocol: TCP  
+- role: worker
+  labels:
+    node: worker-analytics

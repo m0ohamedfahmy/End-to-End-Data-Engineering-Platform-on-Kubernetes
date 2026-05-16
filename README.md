@@ -1,18 +1,25 @@
-# 🚀 Spark · Airflow · MinIO — Cloud-Native Data Pipeline on Kubernetes
+# Project: End-to-End Data Engineering Platform on Multi-Cluster Kubernetes
+## Description:
+- Designed and implemented a cloud-native distributed data platform on Kubernetes using Spark Operator, Apache Airflow, JupyterHub, and S3-compatible storage (MinIO/AWS S3). Built a multi-cluster architecture where separate Kubernetes clusters were dedicated for batch processing workloads and analytics/ad-hoc analysis workloads to improve scalability and workload isolation. Developed scalable ETL pipelines and automated data workflows using Airflow with SparkKubernetesOperator to orchestrate Spark jobs. Integrated JupyterHub with Spark Connect to enable interactive analytics and ad-hoc data exploration for multiple users within the platform.
+- Both clusters share the same `kind` Docker bridge network, so nodes can reach each other by IP directly. Spark Connect and MinIO are exposed as `NodePort` services on `spark-dev-worker`, and the notebook pods in the analytics cluster connect to them by IP.
 
-> **A fully automated, cloud-native data engineering stack on a local Kind cluster.**  
+> **A fully automated, cloud-native data engineering stack on a local Multi-Cluster Kind cluster.**  
 > One command deploys everything. Scripts and DAGs live in MinIO — no `hostPath`, no `docker cp`, no manual syncing.
 
-[![Spark](https://img.shields.io/badge/Apache%20Spark-3.2.1-E25A1C?logo=apachespark&logoColor=white)](https://spark.apache.org)
+[![Spark](https://img.shields.io/badge/Apache%20Spark-3.5.0-E25A1C?logo=apachespark&logoColor=white)](https://spark.apache.org)
 [![Airflow](https://img.shields.io/badge/Apache%20Airflow-3.2.1-017CEE?logo=apacheairflow&logoColor=white)](https://airflow.apache.org)
 [![MinIO](https://img.shields.io/badge/MinIO-RELEASE.2024--01--16-C72E49?logo=minio&logoColor=white)](https://min.io)
 [![Kubernetes](https://img.shields.io/badge/Kubernetes-1.29-326CE5?logo=kubernetes&logoColor=white)](https://kubernetes.io)
+[![JupyterHub](https://img.shields.io/badge/JupyterHub-1.0.0-E25A1C?logo=JupyterHub&logoColor=white)](https://https://z2jh.jupyter.org)
+
 
 ---
 
 ## 📋 Table of Contents
 
 - [Architecture](#-architecture)
+- [Batch Job Cluster](#-batch-job-cluster)
+- [Analytics Job Cluster](#-analytics-job-cluster)
 - [Technology Stack](#-technology-stack)
 - [Project Structure](#-project-structure)
 - [Quick Start](#-quick-start)
@@ -20,18 +27,14 @@
 - [Kubernetes Namespaces](#-kubernetes-namespaces)
 - [MinIO Buckets](#-minio-buckets)
 - [Custom Spark Image](#-custom-spark-image)
-- [Data Pipeline](#-data-pipeline)
-- [Airflow DAG](#-airflow-dag)
 - [Live Update Workflow](#-live-update-workflow)
-- [Airflow Connection Setup](#-airflow-connection-setup)
 - [Verification Commands](#-verification-commands)
-- [Troubleshooting](#-troubleshooting)
-- [Bugs Fixed During Development](#-bugs-fixed-during-development)
+- [Challenges and Solutions](#-challenges-and-solutions)
 
 ---
 
 ## 🏗 Architecture
-
+![Data Architecture](photos/k8s_v2.png)
 
 ### Data flow at a glance
 
@@ -45,7 +48,8 @@
 | 📋 Task logs | Streamed to `s3://airflow-logs/logs/` in real time — survive pod deletion |
 
 ---
-
+# Batch Job Cluster
+- Batch Job Cluster include spark operator + minio + aifrlow + spark connect 
 ## 🛠 Technology Stack
 
 | Component | Version | Role |
@@ -75,11 +79,18 @@ spark-minio-pipeline/
 ├── 📂 kind/
 │   └── kind-cluster.yaml                    ← Kind cluster config
 │
+├── 📂 jupyterhub/
+│   ├── Dockerfile.notebook                  ← scipy-notebook + pyspark==3.5.0 
+│   ├── jupyterhub-config.yaml               ← Z2JH Helm values
+│   └── spark_connect_init.py                ← %run helper for notebooks
+│
 ├── 📂 namespaces/
 │   └── namespaces.yaml                      ← All 4 namespaces
 │
 ├── 📂 rbac/
+│   ├── spark-connect-rbac.yaml                SA + cross-namespace Role/RoleBinding  
 │   └── spark-rbac.yaml                      ← ServiceAccount, Role, RoleBinding
+│                                                 
 │
 ├── 📂 minio/manifests/
 │   ├── 01-minio-secret.yaml
@@ -94,10 +105,15 @@ spark-minio-pipeline/
 │   📂 spark-job/scripts
 │        └── pipeline_job.py
 │
-│
-│
 ├── 📂 spark-scripts/
 │   └── pipeline_job.py                      ← PySpark job: raw → select → processed
+│
+├── 📂 spark-connect/
+│   ├── Dockerfile.spark-connect-server        aagumin image + S3A JARs merged
+│   ├──minio-spark-connect-secret.yaml         ← MinIO credentials secret
+│   └──spark-connect-values.yaml               ← Helm values (NodePort, S3A, image)
+│
+├── 📂 spark-connect-custom-chart/            ← Cloned aagumin Helm chart (patched)
 │
 ├── 📂 airflow-dags/
 │   └── spark_pipeline_dag.py                ← Airflow DAG: fetch → submit → monitor
@@ -264,59 +280,244 @@ USER 185
 # Spark Operator
 kubectl get pods -n spark-operator
 kubectl logs deploy/spark-operator-controller -n spark-operator | tail -20
+```
+![SparkoPerator](photos/sparkoperator.png)
 
+```bash
 # Minio
 kubectl get pods -n minio
+```
+![minio](photos/minio.png)
 
+```bash
 # Buckets
 curl -s http://localhost:9000/minio/health/ready
 aws --endpoint-url http://localhost:9000 s3 ls
-
+```
+![bucket](photos/buckets.png)
+```bash
 # Airflow
 kubectl get pods -n airflow
 kubectl logs deploy/airflow-scheduler -n airflow -c mc-sync --tail=20
 kubectl exec -n airflow deploy/airflow-scheduler -c scheduler -- airflow dags list
-
+```
+![airflow](photos/airflow.png)
+```bash
 # Spark job
 kubectl get sparkapplication -n spark-job 
+```
+![sparkapp](photos/sparkapp.png)
 
+---
+
+## 🩺 Challenges and Solutions
+
+### 1- Spark Image Missing Hadoop AWS Dependencies
+
+`Challenge`
+
+The default Spark image used by SparkApplication did not contain:
+- Hadoop AWS modules
+- hadoop-aws
+- aws-java-sdk
+- S3A filesystem libraries
+As a result, Spark failed when trying to access:
+```yaml
+ mainApplicationFile: s3a://
+```
+Even after adding Spark configurations, the required classes and filesystem drivers were still unavailable inside the container.
+
+`Solution`
+
+I built a custom Spark Docker image that included:
+- Hadoop AWS dependencies
+- S3A filesystem support
+- required JAR files
+- compatible Spark & Hadoop versions
+Then I pushed the image into the Kind cluster and updated the SparkApplication image configuration.
+
+### 2- Spark Operator Volume Mount Limitation
+
+`Challenge`
+
+I initially attempted to use:
+- hostPath
+- PersistentVolume (PV)
+- PersistentVolumeClaim (PVC)
+to mount local Spark scripts into Spark pods.
+However, Spark Operator does not properly support mounting local volumes for the mainApplicationFile in the latest Spark Operator workflow, especially in dynamic Kubernetes environments.
+```yaml
+ mainApplicationFile: local:///opt/spark/scripts/test_spark_job.py 
+```
+This created major issues when trying to execute local PySpark scripts.
+
+`Solution`
+
+Instead of relying on local Kubernetes volumes, I redesigned the architecture using MinIO as S3-compatible object storage.
+I stored:
+- Spark scripts
+- Airflow DAGs
+ -logs
+- processed data
+inside MinIO buckets.
+Spark applications then loaded scripts directly using:
+```yaml
+s3a://spark-scripts/pipeline_job.py
 ```
 
+### 3- AWS CLI Synchronization Performance Problem
+
+`Challenge`
+
+To implement live development, I initially used AWS CLI sync commands to upload local files into MinIO.
+However, AWS CLI continuously scanned all local files repeatedly even when no changes occurred.
+
+Problems:
+- High CPU usage
+- Heavy filesystem scanning
+- Delayed synchronization
+- Not true real-time updates
+
+`Solution`
+
+I replaced the polling-based approach with Linux inotifywait.
+`inotifywait` listens for filesystem events in real time and immediately triggers synchronization only when a file is modified.
+
+### 4- Airflow & Spark Logs Disappearing After Job Completion
+
+`Challenge`
+
+One of the biggest issues was log persistence.
+After Spark jobs finished, Kubernetes automatically deleted driver and executor pods.
+
+As a result:
+- Spark logs disappeared
+- Airflow UI could no longer display logs
+- debugging became very difficult
+
+`Solution`
+
+I implemented centralized remote logging using MinIO.
+
+### 5- AWS CLI Could Not Reach MinIO
+
+`Challenge`
+
+AWS CLI initially failed to connect to MinIO running inside Kubernetes.
+The issue was that the MinIO service was configured as: `ClusterIP`
+
+`Solution`
+
+I changed the MinIO service type from: `ClusterIP` to: `NodePort`
+This exposed MinIO outside the cluster and allowed AWS CLI running on the local machine to communicate with MinIO successfully.
+
+### 6- Spark Operator Namespace Watching Issue 
+`Challenge`
+
+At the beginning, the Spark Operator controller was watching the default namespace only.
+When I tried to submit a SparkApplication inside the spark-job namespace, the application failed because the operator could not detect or manage resources outside the default namespace.
+
+`Solution`
+
+I reconfigured the Spark Operator controller to watch the spark-job namespace explicitly.
+This ensured that all SparkApplication resources were properly monitored and managed by the operator.
+
+---
+## 📊 Analytics Job Cluster
+**A dedicated analytics cluster that connects to the existing `spark-dev` data platform.**
+- Include Jupyterhub + Users
+
+### Cross-Cluster Communication
+
+Both clusters share the same `kind` Docker bridge network, so nodes can reach each other by IP directly. Spark Connect and MinIO are exposed as `NodePort` services on `spark-dev-worker`, and the notebook pods in the analytics cluster connect to them by IP.
+
+| Service | spark-dev NodePort | Used by |
+|---------|-------------------|---------|
+| Spark Connect gRPC | `32002` | Notebook `SparkSession.builder.remote()` |
+| Spark UI | `32004` | Browser debugging |
+| MinIO API | `30900` | Direct `boto3` / `s3fs` access |
+| MinIO Console | `30900` | Browser MinIO UI |
 
 ---
 
-## 🩺 Troubleshooting
+## 🛠 Technology Stack
 
-| Symptom | Diagnosis | Fix |
-|---------|-----------|-----|
-| `SparkApplication` has no STATUS | RBAC forbidden in spark-job ns | `kubectl apply -f rbac/spark-rbac.yaml` + restart operator |
-| `ClassNotFoundException: SimpleAWSCredentialsProvider` | Custom image not loaded | `kind load docker-image spark-minio-s3a-custom:3.5.0 --name spark-dev` |
-| `UnknownHostException: minio-service` | Wrong service name in endpoint | `kubectl get svc -n minio` and use exact name |
-| Broken DAG: `botocore 404` | Old DAG calls MinIO at parse time | Upload fixed DAG from `airflow-dags/spark_pipeline_dag.py` |
-| `TypeError: string indices must be integers` | Same as above | Same fix |
-| `data-pro/processed/` empty | Input missing or credentials wrong | Check `s3://data-pro/raw/` and Secret values |
-| `Could not read served logs` | `minio_default` connection missing | Create connection + `s3 mb s3://airflow-logs` |
-
----
-
-## 🐛 Bugs Fixed During Development
-
-| # | Component | Bug | Fix |
-|---|-----------|-----|-----|
-| 1 | Spark Operator | Watched `default` not `spark-job` | `--set controller.namespaces={spark-job}` + patch |
-| 2 | Spark Operator | RBAC forbidden in `spark-job` ns | Added `Role` + `RoleBinding` |
-| 3 | SparkApplication | `hostPath` volumes silently ignored in v2.5.x | Replaced with `s3a://` — no volumes needed |
-| 4 | MinIO DNS | Wrong service name `minio` vs `minio-service` | Confirmed with `kubectl get svc -n minio` |
-| 5 | Credentials provider | `EnvironmentVariableCredentialsProvider` not in hadoop-aws 3.3.4 | `SimpleAWSCredentialsProvider` + `fs.s3a.access.key` in `sparkConf` |
-| 6 | Airflow logs | `Could not read served logs` after pod deletion | Remote logging to MinIO |
-
+| Component | Version | Cluster | Role |
+|-----------|---------|---------|------|
+| Apache Spark | 3.5.0 | spark-dev | Distributed compute |
+| Spark Connect | 3.5.0 | spark-dev | gRPC session server |
+| aagumin/spark-connect-kubernetes | 1.5.1 | spark-dev | Helm chart for Connect server |
+| MinIO | 2024-01-16 | spark-dev | S3-compatible object storage |
+| JupyterHub | 3.3.8 | analytics | Multi-user notebook platform |
+| PySpark client | 3.5.0 | analytics | Notebook-side Spark client |
+| Kind | 0.32.x | both | Kubernetes in Docker |
 
 ---
 
-<div align="center">
+### 1 — Deploy everything
+```bash
+sudo ./setup-analytics-job-cluster.sh
+```
+- Applies RBAC and secrets on spark-dev
+- Builds and loads the Spark Connect server image
+- Patches the aagumin chart (ZGC flags + NodePort)
+- Deploys Spark Connect on spark-dev with NodePort 32002
+- Creates the analytics Kind cluster
+- Builds and loads the notebook image
+- Deploys JupyterHub with the spark-dev-worker IP pre-wired
 
-**Built with ❤️ — Spark · Airflow · MinIO · Kubernetes**
+---
+### 2 — Access JupyterHub 
 
-*Edit locally → upload to MinIO → cluster picks it up. No restarts. No rebuilds.*
+Open **http://localhost:8888** — The username & password: `spark123`
 
+---
+### 3 — Connect to Spark from a notebook
+```python
+%run /usr/local/bin/spark_connect_init.py
+# spark session is now available globally
+
+df = spark.read.parquet("s3a://data-pro/processed/")
+df.show()
+```
+---
+## 🔍 Useful Commands
+
+```bash
+# ── Check the status of the Spark Connect pods ───────────────────────────────────────────────────
+kubectl get pods -n spark-connect
+
+# ── Check the services in the spark-connect namespace ───────────────────────────────────────────────────
+kubectl get svc -n spark-connect
+
+# ── Check the endpoints for the spark-connect service ───────────────────────────────────────────────────
+kubectl get endpoints spark-connect -n spark-connect
+```
+![minio](photos/coom.png)
+
+```bash
+# ── Check the status of the JupyterHub pods ───────────────────────────────────────────────────
+kubectl get pods -n jupyterhub
+```
+![minio](photos/jh.png)
+
+```bash
+# ── Switch cluster contexts ───────────────────────────────────────────────────
+kubectl config use-context kind-spark-dev
+kubectl config use-context kind-analytics
+
+# ── Spark Connect server logs ─────────────────────────────────────────────────
+kubectl logs -n spark-connect -l app.kubernetes.io/name=spark-connect \
+  --context kind-spark-dev --tail=50
+
+# ── Watch executor pods spawn when notebook runs Spark ────────────────────────
+kubectl get pods -n spark-job --context kind-spark-dev -w
+
+# ── JupyterHub user pods ──────────────────────────────────────────────────────
+kubectl get pods -n jupyterhub --context kind-analytics
+
+
+```
+## JupyterHub UI
+![minio](photos/jhui.png)
 </div>
