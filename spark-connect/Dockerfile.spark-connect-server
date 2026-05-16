@@ -1,0 +1,8 @@
+FROM spark-minio-s3a-custom:3.5.0 AS jars
+
+FROM ghcr.io/aagumin/spark-connect-kubernetes:1.0.0
+USER root
+COPY --from=jars /opt/spark/jars/hadoop-aws.jar /opt/spark/jars/
+COPY --from=jars /opt/spark/jars/aws-java-sdk-bundle.jar /opt/spark/jars/
+COPY --from=jars /opt/spark/conf/spark-defaults.conf /opt/spark/conf/spark-defaults.conf
+USER 185

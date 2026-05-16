@@ -1,0 +1,39 @@
+# rbac/spark-connect-rbac.yaml
+# Grants the Spark Connect server (in spark-connect ns) permission to
+# create/delete executor pods in the existing spark-job namespace.
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: spark-connect
+  namespace: spark-connect
+  labels:
+    app.kubernetes.io/managed-by: kubectl
+---
+# Role in spark-job namespace: allows connect server to manage executor pods
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: spark-connect-executor-role
+  namespace: spark-connect
+rules:
+  - apiGroups: [""]
+    resources: ["pods", "pods/log", "services", "configmaps"]
+    verbs: ["create", "get", "list", "watch", "delete", "update", "patch"]
+  - apiGroups: [""]
+    resources: ["persistentvolumeclaims"]
+    verbs: ["create", "delete", "get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: spark-connect-executor-rolebinding
+  namespace: spark-connect
+subjects:
+  - kind: ServiceAccount
+    name: spark-connect
+    namespace: spark-connect
+roleRef:
+  kind: Role
+  apiGroup: rbac.authorization.k8s.io
+  name: spark-connect-executor-role

@@ -1,0 +1,125 @@
+# spark-connect/spark-connect-values.yaml
+# Helm values for: github.com/aagumin/spark-connect-kubernetes
+
+image:
+  repository: spark-connect-s3a
+  tag: 1.0.0
+  pullPolicy: Never
+  imagePullSecrets: []
+
+replicaCount: 1
+
+spark:
+  driver:
+    memoryMiB: 512
+    memoryOverheadMiB: 256
+    cores: 1
+
+  executor:
+    memoryMiB: 512
+    memoryOverheadMiB: 256
+    cores: 1
+    instances: 1
+
+  celeborn:
+    enabled: false
+    masterEndpoints: ""
+  catalog:
+    enabled: false
+    hiveMetastoreConfigMap: spark-connect-hive
+
+  # ── FIX: removed -XX:-UseZGC and -XX:+UseG1GC from all extraJavaOptions.
+  # Even -XX:-UseZGC (disabling it) requires -XX:+UnlockExperimentalVMOptions
+  # on JDK 11, causing "VM option 'UseZGC' is experimental" fatal JVM crash.
+  # The chart's own spark-properties-cm.yaml already sets these JVM flags via
+  # its hardcoded template, so these sparkConfig overrides are not needed.
+  sparkConfig:
+    # Kubernetes cluster manager
+    spark.master: "k8s://https://kubernetes.default.svc:443"
+    spark.submit.deployMode: "client"
+
+    # Executor pod placement
+    spark.kubernetes.namespace: "spark-connect"
+    spark.kubernetes.authenticate.driver.serviceAccountName: "spark-connect"
+    spark.kubernetes.authenticate.executor.serviceAccountName: "spark-connect"
+    spark.kubernetes.container.image: "spark-minio-s3a-custom:3.5.0"
+    spark.kubernetes.container.image.pullPolicy: "Never"
+    spark.kubernetes.executor.request.cores: "200m"
+    # Spark Connect gRPC port
+    spark.connect.grpc.binding.port: "15002"
+
+    # S3A / MinIO — internal cluster DNS
+    spark.hadoop.fs.s3a.endpoint: "http://minio-service.minio.svc.cluster.local:9000"
+    spark.hadoop.fs.s3a.path.style.access: "true"
+    spark.hadoop.fs.s3a.impl: "org.apache.hadoop.fs.s3a.S3AFileSystem"
+    spark.hadoop.fs.s3a.aws.credentials.provider: "org.apache.hadoop.fs.s3a.SimpleAWSCredentialsProvider"
+    spark.hadoop.fs.s3a.access.key: "${MINIO_ACCESS_KEY}"
+    spark.hadoop.fs.s3a.secret.key: "${MINIO_SECRET_KEY}"
+
+    spark.serializer: "org.apache.spark.serializer.KryoSerializer"
+    spark.ui.enabled: "true"
+    spark.ui.port: "4040"
+
+extraEnv:
+  - name: MINIO_ACCESS_KEY
+    valueFrom:
+      secretKeyRef:
+        name: minio-spark-connect-secret
+        key: access-key
+  - name: MINIO_SECRET_KEY
+    valueFrom:
+      secretKeyRef:
+        name: minio-spark-connect-secret
+        key: secret-key
+  # ── FIX: JAVA_TOOL_OPTIONS removed entirely.
+  # Setting -XX:-UseZGC here (or anywhere) crashes JDK 11 with:
+  #   "VM option 'UseZGC' is experimental and must be enabled via
+  #    -XX:+UnlockExperimentalVMOptions"
+  # The JVM exits before Spark Connect even starts.
+  # G1GC is the default GC on JDK 11+ anyway — no flag needed.
+
+service:
+  create: true
+  type: NodePort
+  annotations: {}
+  nodePorts:
+    sparkConnect: 32002
+    sparkUi: 32004
+#-----If you want use to cluster IP instead of NodePort, please uncomment the following code and comment out the above code.
+# service:
+#   type: ClusterIP
+#   port: 15002
+#   targetPort: 15002    
+
+serviceAccount:
+  create: false
+  annotations: {}
+  name: "spark-connect"
+  automountServiceAccountToken: true
+
+resources:
+  requests:
+    cpu: "100m"
+    memory: "512Mi"
+  limits:
+    cpu: "2"
+    memory: "768Mi"
+
+livenessProbe:
+  tcpSocket:
+    port: 15002
+  initialDelaySeconds: 120
+  periodSeconds: 30
+  failureThreshold: 10
+
+readinessProbe:
+  tcpSocket:
+    port: 15002
+  initialDelaySeconds: 60
+  periodSeconds: 20
+  failureThreshold: 5
+
+tolerations:
+  - key: "node-role.kubernetes.io/control-plane"
+    operator: "Exists"
+    effect: "NoSchedule"

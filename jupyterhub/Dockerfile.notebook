@@ -1,0 +1,54 @@
+# jupyterhub/Dockerfile.notebook
+#
+# Custom notebook image for JupyterHub that includes:
+#   - PySpark CLIENT (version must match the Spark Connect server: 3.5.0)
+#   - No Spark runtime / JARs needed — all compute happens server-side
+#   - boto3 + s3fs for direct MinIO access from pandas if needed
+#   - delta-spark client for reading Delta tables via Connect
+#
+# Build:
+#   docker build -f jupyterhub/Dockerfile.notebook -t spark-connect-notebook:latest jupyterhub/
+#
+# Load into Kind:
+#   kind load docker-image spark-connect-notebook:latest --name spark-dev
+
+FROM quay.io/jupyter/scipy-notebook:latest
+
+USER root
+
+# System deps (none extra needed — scipy-notebook already has Python 3.11+)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# ── Python packages ───────────────────────────────────────────────────────────
+# pyspark version MUST match the Spark Connect server version exactly.
+# A version mismatch causes gRPC protocol errors at session creation.
+RUN pip install --no-cache-dir \
+    "pyspark==3.5.0" \
+    "delta-spark==3.0.0" \
+    "grpcio>=1.48.1" \
+    "grpcio-status>=1.48.1" \
+    "pyarrow>=14.0.0" \
+    "pandas>=2.0.0" \
+    "boto3>=1.34.0" \
+    "s3fs>=2024.1.0" \
+    "matplotlib>=3.8.0" \
+    "seaborn>=0.13.0"
+
+# ── Helper startup script ─────────────────────────────────────────────────────
+COPY spark_connect_init.py /usr/local/bin/spark_connect_init.py
+RUN chmod 644 /usr/local/bin/spark_connect_init.py
+
+# ── Startup hook: set PYTHONSTARTUP so the helper auto-runs in ipython ────────
+# Comment this out if you prefer to %run it manually in each notebook.
+# ENV PYTHONSTARTUP=/usr/local/bin/spark_connect_init.py
+
+# Drop back to notebook user (uid 1000)
+USER ${NB_UID}
+
+WORKDIR /home/jovyan
+
+# ── Default env vars (overridden by JupyterHub singleuser.extraEnv) ───────────
+ENV SPARK_CONNECT_URL="sc://spark-connect.spark-connect.svc.cluster.local:15002"
+ENV SPARK_VERSION="3.5.0"

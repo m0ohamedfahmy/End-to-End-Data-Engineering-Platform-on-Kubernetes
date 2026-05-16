@@ -1,0 +1,86 @@
+replicaCount: 1
+
+image:
+  repository: ghcr.io/aagumin/spark-connect-kubernetes
+  tag: 1.0.0
+  pullPolicy: Always
+  imagePullSecrets: []
+
+nameOverride: ""
+fullnameOverride: ""
+
+spark:
+  eventLog:
+    enabled: true
+    dir: ""
+
+  celeborn:
+    enabled: true
+    masterEndpoints: ""
+
+  dynamicAllocation:
+    enabled: true
+
+  awsEndpoint: ""
+
+  driver:
+    cores: 2
+    memoryMiB: 2048
+    memoryOverheadMiB: 384
+    affinity: {}
+    tolerations: []
+
+  executor:
+    cores: 8
+    requestCoresMilliCPU: 4000
+    memoryMiB: 20480
+    memoryOverheadMiB: 5120
+    minExecutors: 1
+    maxExecutors: 10
+    affinity: {}
+    tolerations: []
+    labels: {}
+
+  scratchDir: /tmp
+  kubernetesEndpoint: "https://kubernetes.default.svc.cluster.local:443"
+  packages: []
+  sparkConfig:
+    spark.hadoop.parquet.block.size: "33554432"
+    spark.driver.maxResultSize: 4g
+
+  catalog:
+    enabled: true
+    hiveMetastoreConfigMap: spark-connect-hive
+
+serviceAccount:
+  create: true
+  annotations: {}
+  name: "spark-connect"
+  automountServiceAccountToken: true
+
+service:
+  create: true
+  annotations: {}
+  name: "spark-connect"
+
+podAnnotations: {}
+podLabels:
+  status: 'dev'
+podSecurityContext: {}
+
+securityContext:
+  runAsUser: 185
+  runAsGroup: 185
+
+command: []
+extraArgs: []
+extraEnv: []
+
+mtls:
+  enabled: false
+  prestartscript: ""
+  poststopscript: ""
+
+containerPorts:
+  sparkUi: 4040
+  sparkConnect: 15002

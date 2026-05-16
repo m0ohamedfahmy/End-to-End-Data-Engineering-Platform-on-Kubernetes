@@ -1,0 +1,125 @@
+# jupyterhub/jupyterhub-config.yaml
+# Zero to JupyterHub (Z2JH) Helm chart values.
+# Docs: https://z2jh.jupyter.org/en/stable/
+#
+# Install:
+#   helm repo add jupyterhub https://hub.jupyter.org/helm-chart/
+#   helm upgrade --install jupyterhub jupyterhub/jupyterhub \
+#     --namespace jupyterhub \
+#     --version 3.3.8 \
+#     -f jupyterhub/jupyterhub-config.yaml 
+
+# ── Security token (REQUIRED) ─────────────────────────────────────────────────
+# Generate once and keep stable: openssl rand -hex 32
+# Replace the placeholder below with your generated value.
+proxy:
+  secretToken: "REPLACE_WITH_OUTPUT_OF__openssl_rand_-hex_32"
+  service:
+    # Kind clusters have no LoadBalancer — use NodePort
+    type: NodePort
+    nodePorts:
+      http: 30088
+
+# ── Hub configuration ─────────────────────────────────────────────────────────
+hub:
+  config:
+    # ── Authentication ───────────────────────────────────────────────────────
+    # DummyAuthenticator: any username, fixed password — local dev only.
+    # Replace with GitHub/Google OAuth or LDAP for real deployments.
+    JupyterHub:
+      authenticator_class: dummy
+    DummyAuthenticator:
+      password: "spark123"
+    Authenticator:
+      allowed_users:
+        - spark123  
+
+  # Extra environment variables available inside the hub pod
+  extraEnv:
+    JUPYTERHUB_SPAWNER_CLASS: "kubespawner.KubeSpawner"
+
+# ── Single-user notebook server ───────────────────────────────────────────────
+singleuser:
+  # ── Custom image ─────────────────────────────────────────────────────────
+  image:
+    name: spark-connect-notebook
+    tag: "latest"
+    pullPolicy: Never     # Kind cluster: image loaded with kind load docker-image
+
+  # ── Environment variables injected into every user pod ───────────────────
+  extraEnv:
+    # Spark Connect server DNS — used by spark_connect_init.py
+    SPARK_CONNECT_URL: "sc://172.18.0.3:32002"
+    SPARK_VERSION: "3.5.0"
+    # MinIO endpoint — for direct boto3/s3fs access from notebooks if needed
+    MINIO_ENDPOINT: "http://172.18.0.3:30900"
+    # If using one cluster-internal DNS name for Spark Connect, set it here and update the spark_connect_init.py template accordingly.
+    # SPARK_CONNECT_URL: "sc://spark-connect.spark-connect.svc.cluster.local:15002"
+    # SPARK_VERSION: "3.5.0"
+    # # MinIO endpoint — for direct boto3/s3fs access from notebooks if needed
+    # MINIO_ENDPOINT: "http://minio-service.minio.svc.cluster.local:9000"
+  # ── Resource limits per user pod ─────────────────────────────────────────
+  cpu:
+    limit: 1
+    guarantee: 0.5
+  memory:
+    limit: 2G
+    guarantee: 1G
+
+  # ── Storage ──────────────────────────────────────────────────────────────
+  # "none" = ephemeral; notebooks survive only while pod is running.
+  # For persistent notebooks, switch to "dynamic" and configure a StorageClass.
+  storage:
+    # type: none
+    type: dynamic
+    dynamic:
+      storageClass: standard 
+    capacity: 512Mi
+    homeMountPath: /home/jovyan
+  # ── Default URL — open JupyterLab instead of classic notebook ────────────
+  defaultUrl: "/lab"
+
+  # ── Lifecycle hooks ───────────────────────────────────────────────────────
+  # Copy the demo notebook into the user home dir on first start
+  lifecycleHooks:
+    postStart:
+      exec:
+        command:
+          - "sh"
+          - "-c"
+          - |
+            cp -n /usr/local/bin/spark_connect_init.py /home/jovyan/ 2>/dev/null || true
+  networkPolicy:
+    enabled: true
+    egress:
+      - ports:
+          - port: 15002
+            protocol: TCP
+      - ports:
+          - port: 443
+            protocol: TCP
+      - ports:
+          - port: 53
+            protocol: UDP
+# ── Scheduling ────────────────────────────────────────────────────────────────
+scheduling:
+  userScheduler:
+    enabled: false   # Disable for local Kind cluster (no node autoscaling)
+
+# ── Culling (auto-shutdown idle servers) ─────────────────────────────────────
+cull:
+  enabled: true
+  timeout: 3600      # Cull servers idle for more than 1 hour
+  every: 300         # Check every 5 minutes
+  maxAge: 0          # No hard max age
+
+# ── Debug logging (set to false for production) ───────────────────────────────
+debug:
+  enabled: false
+
+
+prePuller:
+  hook:
+    enabled: false
+  continuous:
+    enabled: false

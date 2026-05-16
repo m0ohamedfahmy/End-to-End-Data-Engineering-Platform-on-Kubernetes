@@ -1,0 +1,10 @@
+apiVersion: v2
+appVersion: 3.5.6
+description: A Helm chart for deploying a Spark-Connect Server on Kubernetes. Work
+  with mtls and celeborn.
+maintainers:
+- email: gumin@live.ru
+  name: Arsen Gumin
+name: spark-connect
+type: application
+version: 1.5.1

@@ -28,3 +28,19 @@ metadata:
   name: airflow
   labels:
     app.kubernetes.io/managed-by: kubectl
+
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: spark-connect
+  labels:
+    app.kubernetes.io/managed-by: kubectl
+
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: jupyterhub
+  labels:
+    app.kubernetes.io/managed-by: kubectl
