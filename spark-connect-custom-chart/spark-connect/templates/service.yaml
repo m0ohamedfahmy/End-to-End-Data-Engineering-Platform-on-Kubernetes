@@ -1,0 +1,67 @@
+# If you want to use clusterIP, please uncomment the following code and set the nodePorts values in values.yaml. The default service type is ClusterIP, which does not require nodePorts.
+# {{- if .Values.service.create -}}
+# apiVersion: v1
+# kind: Service
+# metadata:
+#   name: {{ include "spark.serviceName" . }}
+#   labels:
+#     {{- include "spark.labels" . | nindent 4 }}
+#   {{- with .Values.service.annotations }}
+#   annotations:
+#     {{- toYaml . | nindent 4 }}
+#   {{- end }}
+# spec:
+#   ports:
+#     - name: tcp-connect-server
+#       protocol: TCP
+#       port: {{ .Values.containerPorts.sparkConnect }}
+#       targetPort: {{ .Values.containerPorts.sparkConnect }}
+#     - name: tcp-spark-ui
+#       protocol: TCP
+#       port: {{ .Values.containerPorts.sparkUi }}
+#       targetPort: {{ .Values.containerPorts.sparkUi }}
+#   type: ClusterIP
+#   sessionAffinity: ClientIP
+#   sessionAffinityConfig:
+#     clientIP:
+#       timeoutSeconds: 10800
+
+#   selector:
+#     {{- include "spark.selectorLabels" . | nindent 4 }}
+# {{- end }}
+
+{{- if .Values.service.create -}}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "spark.serviceName" . }}
+  labels:
+    {{- include "spark.labels" . | nindent 4 }}
+  {{- with .Values.service.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  ports:
+    - name: tcp-connect-server
+      protocol: TCP
+      port: {{ .Values.containerPorts.sparkConnect }}
+      targetPort: {{ .Values.containerPorts.sparkConnect }}
+      {{- if eq .Values.service.type "NodePort" }}
+      nodePort: {{ .Values.service.nodePorts.sparkConnect }}
+      {{- end }}
+    - name: tcp-spark-ui
+      protocol: TCP
+      port: {{ .Values.containerPorts.sparkUi }}
+      targetPort: {{ .Values.containerPorts.sparkUi }}
+      {{- if eq .Values.service.type "NodePort" }}
+      nodePort: {{ .Values.service.nodePorts.sparkUi }}
+      {{- end }}
+  type: {{ .Values.service.type }}
+  sessionAffinity: ClientIP
+  sessionAffinityConfig:
+    clientIP:
+      timeoutSeconds: 10800
+  selector:
+    {{- include "spark.selectorLabels" . | nindent 4 }}
+{{- end }}
