@@ -17,7 +17,7 @@
 
 ## 📋 Table of Contents
 
-- [Architecture](#-architecture)
+- [Architecture](#-architecture) 
 - [Batch Job Cluster](#-batch-job-cluster)
 - [Analytics Job Cluster](#-analytics-job-cluster)
 - [Technology Stack](#-technology-stack)
@@ -48,7 +48,7 @@
 | 📋 Task logs | Streamed to `s3://airflow-logs/logs/` in real time — survive pod deletion |
 
 ---
-# Batch Job Cluster
+## 🛠 Batch Job Cluster
 - Batch Job Cluster include spark operator + minio + aifrlow + spark connect 
 ## 🛠 Technology Stack
 
